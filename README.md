@@ -87,26 +87,25 @@ When a backup is created via the `schedule` resource, the backup will follow the
 
 *explain process of what happens when it runs*
 ---
-  pods are created as part of snapshotmovedata 
-    dataupload object is created 
-  first backup will take longest time to upload to gcp 
-  subsequent backups will be much quicker depending on how much has changed 
-  backup object will show differe phases - and then wait til it says completed. 
-    can see the stuff show up in gcp bucket 
+pods are created as part of snapshotmovedata 
+dataupload object is created 
+first backup will take longest time to upload to gcp 
+subsequent backups will be much quicker depending on how much has changed 
+backup object will show differe phases - and then wait til it says completed. 
+can see the stuff show up in gcp bucket 
 ---
 ### Restore 
 
-how we define what backup we want to restore from and what objects should be restored 
+How we define what backup we want to restore from and what objects should be restored 
 
 https://velero.io/docs/main/api-types/restore/
 
 https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/backup_and_restore/oadp-application-backup-and-restore#oadp-restoring
 
-#### important to explain 
-  must specify the backup 
-  exclude pods 
-    avoid connection error 
-      let statefulsets spin up a new pod 
+Important spec components in the example `restore.yaml`:
+- `backupName` - Must specify the backup or else restore will not happen
+- `includedNamespaces` - Which namespaces to restore from the backup, can be multiple but for simplicity we only list the one from the backup
+- `excludedResources` - Upon restore that included `pods`, there were no connections going in/out of the `mysql` pods. *Reason unknown for now.* So in order to avoid this issue, exclude restoring the pods and let the `statefulset` spin up a fresh pod.
 
 *explain process of what happens when it runs*
 ---
