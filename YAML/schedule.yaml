@@ -1,0 +1,46 @@
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: 30m-mysql-backup-schedule
+  namespace: openshift-adp
+spec:
+  schedule: "*/30 * * * *"
+  template:
+    defaultVolumesToFsBackup: false
+    csiSnapshotTimeout: 5m0s
+    ttl: 72h0m0s
+    #Should match the BSL (Backup Storage Location) created by DPA
+    storageLocation: oadp-gcp-1
+    snapshotMoveData: true 
+    includedNamespaces:
+      - demo-mysql
+    excludedResources:
+      - secrets
+    orderedResources:
+      pods: "demo-mysql/mysql-secondary-0,demo-mysql/mysql-primary-0"
+    hooks:
+      resources:
+        - name: 30m-mysql-freeze-hook 
+          includedNamespaces:
+            - demo-mysql
+          pre:
+            - exec:
+                container: mysql
+                timeout: 300s
+                command:
+                  - /bin/bash
+                  - '-c'
+                  - |
+                    date +%T 
+                    mysql -uroot -p"$(cat $MYSQL_ROOT_PASSWORD_FILE)" -e "FLUSH TABLES WITH READ LOCK; DO SLEEP(600);" > /dev/null 2>&1 & 
+                    echo $! > /tmp/mysql_lock.pid
+                    sleep 3
+          post:
+            - exec:
+                container: mysql
+                command:
+                  - /bin/bash
+                  - '-c'
+                  - |
+                    date +%T && kill $(cat /tmp/mysql_lock.pid)
+                    rm -f /tmp/mysql_lock.pid

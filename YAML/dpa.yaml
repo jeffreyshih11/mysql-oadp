@@ -1,0 +1,28 @@
+apiVersion: oadp.openshift.io/v1alpha1
+kind: DataProtectionApplication
+metadata:
+  name: oadp-gcp
+  namespace: openshift-adp
+spec:
+  backupLocations:
+    - velero:
+        credential:
+          key: serviceaccount-creds
+          name: gcp
+        default: true
+        objectStorage:
+          bucket: <Bucket created in GCP>
+          prefix: oadp
+        provider: gcp
+  configuration:
+    nodeAgent:
+      enable: true
+      uploaderType: kopia
+    velero:
+      defaultPlugins:
+        - openshift
+        - gcp
+        - csi
+      disableFsBackup: false
+  logFormat: text
+

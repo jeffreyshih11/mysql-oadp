@@ -1,0 +1,13 @@
+apiVersion: velero.io/v1
+kind: Restore
+metadata:
+  name: restore-30m-mysql-backup-schedule-<specific timestamp>
+  namespace: openshift-adp
+spec:
+  backupName: 30m-mysql-backup-schedule-<specific timestamp>
+  includedNamespaces:
+    - demo-mysql
+  excludedResources:
+    - pods
+  itemOperationTimeout: 4h0m0s
+  restorePVs: true
