@@ -46,26 +46,41 @@ Once OADP is installed, create a `DataProtectionApplication (DPA)`, this is wher
     
 ---
 ### Data Mover 
-The important thing. able to take advantage of the split second speed of a volume snapshot while still uploading the data to gcp. 
+The important thing - this allows us to take advantage of the split second speed of a volume snapshot while still uploading the data to GCP
 
-if we dont do this we rely solely on volumesnapshots or completel file system backup
+- Snapshot only - snapshots only reside on the cluster so is vulnerable to cluster wide disasters 
 
-snapshot only - only reside on the cluster so is vulnerable to cluster wide disasters 
-fs backup - super slow to check and upload every file even with kopia. presents an unacceptable amount of downtime to the database every time a backup is taken 
-    - takes snapshot of the volume first 
-    copies it to a temp pv 
-    takes all data in temp pv and uploads it via kopia 
-https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/backup_and_restore/oadp-application-backup-and-restore#oadp-data-mover
-
-https://www.redhat.com/en/blog/openshift-apis-data-protection-13-data-mover
+- File system backup only - Very slow to check and upload every file even with kopia. presents an unacceptable amount of downtime to the database every time a backup is taken 
 
 ---
+DataMover allows OADP to take a "split-second" capture of your data and then perform the slow, heavy lifting of uploading to GCP in the background without affecting your application. 
+
+[Documentation](https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/backup_and_restore/oadp-application-backup-and-restore#oadp-data-mover)
+
+[Blog Post](https://www.redhat.com/en/blog/openshift-apis-data-protection-13-data-mover)
+
+*Note* - The first backup will take the longest as it uploads the full dataset. Subsequent backups are significantly quicker because Kopia only uploads the blocks that have changed since the last run.
+
+The Backup Workflow
+1. Instant Capture: OADP triggers a CSI Snapshot. Because this is a metadata operation at the storage level, it completes in a split second. Your MySQL database only needs to be frozen for this tiny window.
+
+2. Snapshot Unlocking: Immediately after the snapshot is taken, the database is "thawed" and resumes normal operations.
+
+3. The DataUpload Engine: OADP creates a DataUpload object and spins up DataMover pods (via the node-agent).
+
+4. The Temp PV: These pods mount a temporary PVC which is a clone of the snapshot.
+
+5. Durable Upload: The DataMover pod uses Kopia to deduplicate and upload the data from the temporary PVC to your GCP bucket.
+
+---
+
 ### Backup Resource
 
-How we define what objects to backup  
-https://velero.io/docs/main/api-types/backup/
+How we define what objects to backup
 
-https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/backup_and_restore/oadp-application-backup-and-restore#oadp-creating-backup-cr-doc
+[Velero Documentation](https://velero.io/docs/main/api-types/backup/)
+
+[OADP Documentation](https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/backup_and_restore/oadp-application-backup-and-restore#oadp-creating-backup-cr-doc)
 
 Important spec components in the example `backup.yaml` and `schedule.yaml`:
 - `ttl` - 'Time to live' - how long the backup will exist in the GCP bucket, this does not apply to the data backed up 
@@ -85,42 +100,68 @@ When a backup is created via the `schedule` resource, the backup will follow the
 
 
 
-*explain process of what happens when it runs*
+*Process of what happens when a scheduled backup is triggered*
 ---
-pods are created as part of snapshotmovedata 
-dataupload object is created 
-first backup will take longest time to upload to gcp 
-subsequent backups will be much quicker depending on how much has changed 
-backup object will show differe phases - and then wait til it says completed. 
-can see the stuff show up in gcp bucket 
+**Reminder** - Because Kopia uses incremental backups the initial backup of a volume will take the longest amount of time (can up more than an hour) as all the data is new. Subsequent backups will take significantly less time
+
+1. A new backup resource is created
+2. CSI Snapshot: OADP requests a local CSI snapshot of the volume. 
+    1. For every volume being moved, OADP creates a `DataUpload` Custom Resource. 
+    2.  Data Mover Pods: The node-agent (a DaemonSet running on your worker nodes) detects the DataUpload. It spins up or utilizes Data Mover pods (often referred to as the node-agent's worker process) to do the heavy lifting. These pods mount the CSI snapshot as a volume
+
+3. Once the backup is complete you will see new directories in your GCP bucket
+    - `/backups/<backup-name>`: Contains the metadata tarballs and logs.
+    - `/kopia`: This is the "Repository." This is where the deduplicated volume data lives.
+
+Phases: 
+- **InProgress**: Metadata is being collected and snapshots are being triggered.
+- **WaitingForPluginOperations**: The DataMover phase. OADP is waiting for the DataUpload pods to finish moving data to GCP.
+- **Completed**
+- **PartiallyFailed** - YAMLs are safe; some Data or Objects failed.
+- **Failed**
 ---
 ### Restore 
 
 How we define what backup we want to restore from and what objects should be restored 
 
-https://velero.io/docs/main/api-types/restore/
+[Velero Documentation](https://velero.io/docs/main/api-types/restore/)
 
-https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/backup_and_restore/oadp-application-backup-and-restore#oadp-restoring
+[OADP Documentation](https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/backup_and_restore/oadp-application-backup-and-restore#oadp-restoring)
 
 Important spec components in the example `restore.yaml`:
 - `backupName` - Must specify the backup or else restore will not happen
 - `includedNamespaces` - Which namespaces to restore from the backup, can be multiple but for simplicity we only list the one from the backup
 - `excludedResources` - Upon restore that included `pods`, there were no connections going in/out of the `mysql` pods. *Reason unknown for now.* So in order to avoid this issue, exclude restoring the pods and let the `statefulset` spin up a fresh pod.
 
-*explain process of what happens when it runs*
+*Process of what happens when a restore is triggered*
 ---
-  might be best to completely delete the project before restore 
-  restore can take up to an hour depending on how much data there is in the backup 
-  datadownload object is created 
-  restore pods are spun up 
-    will mount a temp pvc and download the data 
-    once all data is downloaded to pv the temp pvc will detach 
-    real pvc for the app will then bind to the pv 
-    once download is done restore pods will go away 
-  objects will come back pretty quick, data takes longest 
-    statefulset will spin up pods like normal 
-      there may be some time between primary/secondary 
-        secondary might not connect to primary (will update if retries is fixed) 
-      do not anticipate any issues connecting to pods 
-    external secret should generate the secret just fine 
+1. Before initiating a restore, it is highly recommended to completely delete the target project (namespace).
+    - Avoid Conflicts: OADP may fail to overwrite existing resources (Services, Routes, or ConfigMaps), leading to a PartiallyFailed restore status.
+
+2. When using DataMover (powered by VolSync and Kopia in OADP 4.19), the restore follows a sophisticated "Helper Pod" sequence to move data from offsite storage back into your cluster volumes.
+
+    Step 1: API Object Injection
+    OADP instantly injects the "logic" of your application (YAMLs for Deployments, Services, Routes, etc.) into the OpenShift API. Your application pods will appear but stay in a Pending or ContainerCreating state.
+
+    Step 2: DataDownload Execution - The heavy lifting occurs through the DataDownload Custom Resource:
+
+    1. Helper Pods: OADP spins up temporary restore pods in the openshift-adp namespace.
+
+    2. Temporary PVC: These pods mount a temporary PVC.
+
+    3. Data Transfer: Data is pulled from the object store (GCS/S3) and written into this temporary volume.
+
+    4. Volume Binding: Once the download is 100% complete, the temporary PVC is detached, and the "Real" PVC for your application is bound to the populated Persistent Volume (PV).
+
+    5. Termination: Once the data is successfully placed, the helper pods and DataDownload objects are cleaned up.
+
+    Step 3: Application pods will reach `running` state. 
+    - Note - if the secondary mysql instance starts before the primary, it will have 10 attempts to connect to the primary, once every 10 seconds. If all 10 attempts fail the secondary will remain `running` but is not actively connected to the primary. If this is the case restart the secondary pod.
+
+Phases: 
+- **InProgress**: OADP is recreating your Namespaces, Services, and Secrets.
+- **WaitingForPluginOperations**: The YAMLs are in, but OADP is now waiting for the DataDownload (DataMover) pods to finish pulling the MySQL blocks from GCP.
+- **Completed**
+- **PartiallyFailed** - Some objects already existed or had conflicts. 
+- **Failed**
   
