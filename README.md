@@ -30,33 +30,21 @@ None of these were able to satisfy requirements in my situation because they eit
 - did not meet developer requirements 
 - required paying more money
 
-that led us to 
-**somethign about what oadp is** 
-https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/backup_and_restore/oadp-application-backup-and-restore
+This led me to [OADP (OpenShift API for Data Protection)](https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/backup_and_restore/oadp-application-backup-and-restore)
+- Is included as part of OpenShift subscription
+- Based on [Velero](https://velero.io/) an open source Kubernetes native back up, restore, and migration tool
+- Able to use snapshots to have minimal downtime to the databases
+- Can backup and restore all OpenShift resources in a project, not just the data
+- Able to restore to a completely new cluster if the original is lost
 
-- it comes with openshift 
-- kubernetes native 
-- has minimal downtime 
-- can backup all objects in a project, not just the data 
-## Installing OAPD
+## Installing and Configuring OAPD
+[Installing OADP](https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/backup_and_restore/oadp-application-backup-and-restore#installing-oadp) is as easy as selecting the OADP operator from the operator catalog and clicking 'install'
 
-prerequisites 
-- have service account for gcp with bucket access 
-    - put creds in an external secret 
-            - gcp-installer-sa.json 
-- have a bucket created in gcp already 
+Follow [these instructions](https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/backup_and_restore/oadp-application-backup-and-restore#configuring-oadp-with-google-cloud) for configuring with GCP (includes set up of storage bucket and service account)
 
-https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/backup_and_restore/oadp-application-backup-and-restore#installing-oadp
-
-https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/backup_and_restore/oadp-application-backup-and-restore#configuring-oadp-with-google-cloud
-
-## once adp is installed 
-### create dataprotectionapplication 
-- this will create a backupStorageLocation as well 
+Once OADP is installed, create a `DataProtectionApplication (DPA)`, this is where we define where backups are stored, what credentials to use, and what plugins to enable. This will create a `BackupStorageLocation (BSL)` that connects to the bucket created in GCP
     
-    this verifies if we can connect to the bucket 
-      phase: available is good 
-
+---
 ### Data Mover 
 The important thing. able to take advantage of the split second speed of a volume snapshot while still uploading the data to gcp. 
 
@@ -64,12 +52,14 @@ if we dont do this we rely solely on volumesnapshots or completel file system ba
 
 snapshot only - only reside on the cluster so is vulnerable to cluster wide disasters 
 fs backup - super slow to check and upload every file even with kopia. presents an unacceptable amount of downtime to the database every time a backup is taken 
-
+    - takes snapshot of the volume first 
+    copies it to a temp pv 
+    takes all data in temp pv and uploads it via kopia 
 https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/backup_and_restore/oadp-application-backup-and-restore#oadp-data-mover
 
 https://www.redhat.com/en/blog/openshift-apis-data-protection-13-data-mover
 
-
+---
 ### Backup Resource
 
 How we define what objects to backup  
@@ -77,54 +67,33 @@ https://velero.io/docs/main/api-types/backup/
 
 https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/backup_and_restore/oadp-application-backup-and-restore#oadp-creating-backup-cr-doc
 
-
-- ttl
-    - how long the backup exists in gcp bucket 
-    - does not apply to the data stored in volumes 
-- storage location 
-    - which location to use if multiple - but wont 
-- snapshotmovedata 
-    - takes snapshot of the volume first 
-    copies it to a temp pv 
-    takes all data in temp pv and uploads it via kopia 
-- excludedResources
-    no secrets because that data should be stored elsewhere, even if encrypted. anything required should be an external secret anyways
-- orderedResources
-    necessary to avoid split brain issue on restore 
-    only doing pods because when you backup a pod velero will also backup any mounted pvc before doing the next one 
-- hooks 
-    - necessary to freeze the db to avoid corruption 
-    time between hooks usuall ~15s 
-      pre - do the read lock and keep the process in background because otherwise the the read lock will only run tfor that exact second and release. so the sleep is necessary 
-      post - kill the process and resume normal functionality 
-
+Important spec components in the example `backup.yaml` and `schedule.yaml`:
+- `ttl` - 'Time to live' - how long the backup will exist in the GCP bucket, this does not apply to the data backed up 
+- `storage location ` - Which `BSL` to back up to
+- `snapshotmovedata ` - This is how we enable `Data mover` 
+- `excludedResources` - No secrets should be backed up, even if it is encrypted, anything required should be an external secret anyways
+- `orderedResources` - Necessary to avoid split brain issue on restore. We want to backup the secondary mysql instance first so that it will be behind the primary mysql instance. If we do the opposite, the secondary could have newer data that the primary does not and when restoring, the secondary will have data the priamry does not. Only need to list `pods` because velero will also backup any mounted `persistent volumes` before backing up the next in the list.
+- `hooks` - Necessary to freeze the database to avoid corruption, in my testing the time between hooks was about 15 seconds 
+    - Pre-hook - Apply a read lock on the database, keep the process in the background, and save the pid. The `DO SLEEP` is necessary otherwise the the read lock will only run for that exact second and then release
+    - Post-hook - kill the process started by the pre-hook
+---
 ### Schedule Resource
 
-Create backups on a schedule - essentially the backup resource with cron 
+To create backups on a schedule - we need to create a [schedule resource](https://velero.io/docs/v1.3.0/api-types/schedule/) - essentially a backup resource with cron. 
 
-https://velero.io/docs/v1.3.0/api-types/schedule/
-
-
-- this will be in the helm charts as a template 
-    new values 
-      backup - true/false 
-      cron schedule 
-    templatize 
-      all names 
-      namespace 
-      maybe ttl 
+When a backup is created via the `schedule` resource, the backup will follow the template specified in the yaml and will be named `<schedule-resource-name>-<date time created>
 
 
-#### important things to explain  
-- created backup objects and naming convention 
 
-#### explain process 
-
+*explain process of what happens when it runs*
+---
   pods are created as part of snapshotmovedata 
     dataupload object is created 
   first backup will take longest time to upload to gcp 
   subsequent backups will be much quicker depending on how much has changed 
-
+  backup object will show differe phases - and then wait til it says completed. 
+    can see the stuff show up in gcp bucket 
+---
 ### Restore 
 
 how we define what backup we want to restore from and what objects should be restored 
@@ -133,20 +102,14 @@ https://velero.io/docs/main/api-types/restore/
 
 https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/backup_and_restore/oadp-application-backup-and-restore#oadp-restoring
 
-  will want to make it a workflow 
-    user inputs 
-      what namespace/app
-      what backup to use
-    might want to find a way to get existing backups?
-  also templatize it as helm file 
-
 #### important to explain 
   must specify the backup 
   exclude pods 
     avoid connection error 
       let statefulsets spin up a new pod 
 
-explain process 
+*explain process of what happens when it runs*
+---
   might be best to completely delete the project before restore 
   restore can take up to an hour depending on how much data there is in the backup 
   datadownload object is created 
