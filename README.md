@@ -164,4 +164,11 @@ Phases:
 - **Completed**
 - **PartiallyFailed** - Some objects already existed or had conflicts. 
 - **Failed**
-  
+---
+
+
+### What if we did want to only backup with snapshots?
+
+- Make sure your storage csi driver is capable of volume snapshots.
+- Retain the pre/post hooks to apply the `READ LOCK` to the database.
+- Current version of OADP requires us to delete the `VolumeSnapshot` and `VolumeSnapshotContent` objects that are created after a restore is run. Snapshots created during a backup and deleted automatically. 

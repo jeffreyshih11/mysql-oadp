@@ -9,6 +9,7 @@ spec:
   ttl: 72h0m0s
   #Should match the BSL (Backup Storage Location) created by DPA
   storageLocation: oadp-gcp-1
+  #set to false for snapshot only backup
   snapshotMoveData: true 
   includedNamespaces:
     - demo-mysql
