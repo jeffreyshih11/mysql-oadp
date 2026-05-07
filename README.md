@@ -102,22 +102,22 @@ When a backup is created via the `schedule` resource, the backup will follow the
 
 *Process of what happens when a scheduled backup is triggered*
 ---
-**Reminder** - Because Kopia uses incremental backups the initial backup of a volume will take the longest amount of time (can up more than an hour) as all the data is new. Subsequent backups will take significantly less time
-
 1. A new backup resource is created
 2. CSI Snapshot: OADP requests a local CSI snapshot of the volume. 
+
+    **If using DataMover** - Because Kopia uses incremental backups the initial backup of a volume will take the longest amount of time (can up more than an hour) as all the data is new. Subsequent backups will take significantly less time
     1. For every volume being moved, OADP creates a `DataUpload` Custom Resource. 
     2.  Data Mover Pods: The node-agent (a DaemonSet running on your worker nodes) detects the DataUpload. It spins up or utilizes Data Mover pods (often referred to as the node-agent's worker process) to do the heavy lifting. These pods mount the CSI snapshot as a volume
 
 3. Once the backup is complete you will see new directories in your GCP bucket
     - `/backups/<backup-name>`: Contains the metadata tarballs and logs.
-    - `/kopia`: This is the "Repository." This is where the deduplicated volume data lives.
+    - **If using DataMover** `/kopia`: This is the "Repository." This is where the deduplicated volume data lives.
 
 Phases: 
 - **InProgress**: Metadata is being collected and snapshots are being triggered.
 - **WaitingForPluginOperations**: The DataMover phase. OADP is waiting for the DataUpload pods to finish moving data to GCP.
 - **Completed**
-- **PartiallyFailed** - YAMLs are safe; some Data or Objects failed.
+- **PartiallyFailed** - Typically, YAMLs are safe; some Data or Objects failed.
 - **Failed**
 ---
 ### Restore 
@@ -138,7 +138,15 @@ Important spec components in the example `restore.yaml`:
 1. Before initiating a restore, it is highly recommended to completely delete the target project (namespace).
     - Avoid Conflicts: OADP may fail to overwrite existing resources (Services, Routes, or ConfigMaps), leading to a PartiallyFailed restore status.
 
-2. When using DataMover (powered by VolSync and Kopia in OADP 4.19), the restore follows a sophisticated "Helper Pod" sequence to move data from offsite storage back into your cluster volumes.
+2a. Volume Snapshots Only
+    Step 1: API Object Injection
+    OADP instantly injects the "logic" of your application (YAMLs for Deployments, Services, Routes, etc.) into the OpenShift API. Your application pods will appear but stay in a Pending or ContainerCreating state.
+
+    Step 2: Recreate the `VolumeSnapshotContent` that points to the snapshot ID in our storage provider and create the corresponding `VolumeSnapshot` 
+
+    Step 3: Create the PVC's and point to the `VolumeSnapshot` as the data source
+
+2b. When using DataMover (powered by VolSync and Kopia in OADP 4.19), the restore follows a sophisticated "Helper Pod" sequence to move data from offsite storage back into your cluster volumes.
 
     Step 1: API Object Injection
     OADP instantly injects the "logic" of your application (YAMLs for Deployments, Services, Routes, etc.) into the OpenShift API. Your application pods will appear but stay in a Pending or ContainerCreating state.
@@ -149,14 +157,14 @@ Important spec components in the example `restore.yaml`:
 
     2. Temporary PVC: These pods mount a temporary PVC.
 
-    3. Data Transfer: Data is pulled from the object store (GCS/S3) and written into this temporary volume.
+    3. Data Transfer: Data is pulled from the object store and written into this temporary volume.
 
     4. Volume Binding: Once the download is 100% complete, the temporary PVC is detached, and the "Real" PVC for your application is bound to the populated Persistent Volume (PV).
 
     5. Termination: Once the data is successfully placed, the helper pods and DataDownload objects are cleaned up.
 
-    Step 3: Application pods will reach `running` state. 
-    - Note - if the secondary mysql instance starts before the primary, it will have 10 attempts to connect to the primary, once every 10 seconds. If all 10 attempts fail the secondary will remain `running` but is not actively connected to the primary. If this is the case restart the secondary pod.
+3: Application pods will reach `running` state. 
+- Note - if the secondary mysql instance starts before the primary, it will have 10 attempts to connect to the primary, once every 10 seconds. If all 10 attempts fail the secondary will remain `running` but is not actively connected to the primary. If this is the case restart the secondary pod.
 
 Phases: 
 - **InProgress**: OADP is recreating your Namespaces, Services, and Secrets.
